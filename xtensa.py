@@ -33,13 +33,14 @@ import copy
 
 try:
     from idaapi import *
+    import idc
 except ImportError:
     class processor_t(object):
         pass
     dt_byte = dt_word = dt_dword = None
     PR_SEGS = PR_DEFSEG32 = PR_RNAMESOK = PR_ADJSEGS = PRN_HEX = PR_USE32 = 0
     ASH_HEXF3 = ASD_DECF0 = ASO_OCTF1 = ASB_BINF3 = AS_NOTAB = AS_ASCIIC = AS_ASCIIZ = 0
-    CF_CALL = CF_JUMP = CF_STOP = 0
+    CF_CALL = CF_JUMP = CF_STOP = CF_CHG1 = 0
     o_void = o_reg = o_imm = o_displ = o_near = None
 
 class Operand:
@@ -181,12 +182,13 @@ class Instr(object):
     fmt_RI6         = (2, (Operand(Operand.REG, 4, 8), Operand(Operand.RELU, 4, 12, 2, 4)))
     fmt_RI7         = (2, (Operand(Operand.REG, 4, 8), Operand(Operand.IMM, 4, 12, 3, 4, xlate=movi_n)))
 
-    def __init__(self, name, opcode, mask, fmt, flags = 0):
+    def __init__(self, name, opcode, mask, fmt, flags = 0, simple_callable = None):
         self.name = name
         self.opcode = opcode
         self.mask = mask
         (self.size, self.fmt) = fmt
         self.flags = flags
+        self.simple_callable = simple_callable
 
     def match(self, op):
         return (op & self.mask) == self.opcode
@@ -246,18 +248,18 @@ class XtensaProcessor(processor_t):
     }
 
     ops = (
-        ("abs",    0x600100, 0xff0f0f, Instr.fmt_RRR_2rr ),
+        ("abs",    0x600100, 0xff0f0f, Instr.fmt_RRR_2rr, CF_CHG1, lambda r, t: -t if t & 0x80000000 else t),
         ("abs.s",  0xfa0010, 0xff00ff, Instr.fmt_RRR_sll ),
-        ("add",    0x800000, 0xff000f, Instr.fmt_RRR ),
+        ("add",    0x800000, 0xff000f, Instr.fmt_RRR, CF_CHG1, lambda r, s, t: s + t),
         ("add.s",  0x0a0000, 0xff000f, Instr.fmt_RRR ),
-        ("addi",   0x00c002, 0x00f00f, Instr.fmt_RRI8 ),
-        ("addmi",  0x00d002, 0x00f00f, Instr.fmt_RRI8_addmi ),
-        ("addx2",  0x900000, 0xff000f, Instr.fmt_RRR ),
-        ("addx4",  0xa00000, 0xff000f, Instr.fmt_RRR ),
-        ("addx8",  0xb00000, 0xff000f, Instr.fmt_RRR ),
+        ("addi",   0x00c002, 0x00f00f, Instr.fmt_RRI8, CF_CHG1, lambda r, s, imm: s + imm),
+        ("addmi",  0x00d002, 0x00f00f, Instr.fmt_RRI8_addmi, CF_CHG1, lambda r, s, imm: s + imm),
+        ("addx2",  0x900000, 0xff000f, Instr.fmt_RRR, CF_CHG1, lambda r, s, t: (s << 1) + t),
+        ("addx4",  0xa00000, 0xff000f, Instr.fmt_RRR, CF_CHG1, lambda r, s, t: (s << 2) + t),
+        ("addx8",  0xb00000, 0xff000f, Instr.fmt_RRR, CF_CHG1, lambda r, s, t: (s << 3) + t),
         ("all4",   0x009000, 0xfff00f, Instr.fmt_RRR_2r ),
         ("all8",   0x00b000, 0xfff00f, Instr.fmt_RRR_2r ),
-        ("and",    0x100000, 0xff000f, Instr.fmt_RRR ),
+        ("and",    0x100000, 0xff000f, Instr.fmt_RRR, CF_CHG1, lambda r, s, t: s & t),
         ("andb",   0x020000, 0xff000f, Instr.fmt_RRR ),
         ("andbc",  0x120000, 0xff000f, Instr.fmt_RRR ),
         ("any4",   0x008000, 0xfff00f, Instr.fmt_RRR_2r ),
@@ -303,7 +305,7 @@ class XtensaProcessor(processor_t):
         ("entry",  0x000036, 0x0000ff, Instr.fmt_RI12S3 ),
         ("esync",  0x002020, 0xffffff, Instr.fmt_NONE ),
         ("excw",   0x002080, 0xffffff, Instr.fmt_NONE ),
-        ("extui",  0x040000, 0x0e000f, Instr.fmt_RRR_extui ),
+        ("extui",  0x040000, 0x0e000f, Instr.fmt_RRR_extui, CF_CHG1, lambda r, t, shift, mask: (t >> shift) & ((1 << mask) - 1)),
         ("extw",   0x0020d0, 0xffffff, Instr.fmt_NONE ),
         ("float.s",0xca0000, 0xff000f, Instr.fmt_RRR_ceil ),
         ("floor.s",0xaa0000, 0xff000f, Instr.fmt_RRR_ceil ),
@@ -333,18 +335,18 @@ class XtensaProcessor(processor_t):
         ("memw",   0x0020c0, 0xffffff, Instr.fmt_NONE ),
         ("min",    0x430000, 0xff000f, Instr.fmt_RRR ),
         ("minu",   0x630000, 0xff000f, Instr.fmt_RRR ),
-        ("mov",    0x200000, 0xff000f, Instr.fmt_RRR_sll ),
-        ("mov.s",  0xfa0000, 0xff00ff, Instr.fmt_RRR_sll ),
-        ("moveqz", 0x830000, 0xff000f, Instr.fmt_RRR ),
+        ("mov",    0x200000, 0xff000f, Instr.fmt_RRR_sll, CF_CHG1, lambda r, s: s),
+        ("mov.s",  0xfa0000, 0xff00ff, Instr.fmt_RRR_sll),
+        ("moveqz", 0x830000, 0xff000f, Instr.fmt_RRR, CF_CHG1, lambda r, s, t: s if t == 0 else r),
         ("moveqz.s",      0x8b0000, 0xff000f, Instr.fmt_RRR ),
         ("movf",   0xc30000, 0xff000f, Instr.fmt_RRR ),
         ("movf.s", 0xcb0000, 0xff000f, Instr.fmt_RRR ),
-        ("movgez", 0xb30000, 0xff000f, Instr.fmt_RRR ),
+        ("movgez", 0xb30000, 0xff000f, Instr.fmt_RRR, CF_CHG1, lambda r, s, t: s if t >= 0 else r ),
         ("movgez.s",      0xbb0000, 0xff000f, Instr.fmt_RRR ),
-        ("movi",   0x00a002, 0x00f00f, Instr.fmt_RRI8_i12 ),
-        ("movltz", 0xa30000, 0xff000f, Instr.fmt_RRR ),
+        ("movi",   0x00a002, 0x00f00f, Instr.fmt_RRI8_i12, CF_CHG1, lambda r, imm: imm),
+        ("movltz", 0xa30000, 0xff000f, Instr.fmt_RRR, CF_CHG1, lambda r, s, t: s if t & 0x80000000 else r),
         ("movltz.s",      0xab0000, 0xff000f, Instr.fmt_RRR ),
-        ("movnez", 0x930000, 0xff000f, Instr.fmt_RRR ),
+        ("movnez", 0x930000, 0xff000f, Instr.fmt_RRR, CF_CHG1, lambda r, s, t: s if t != 0 else r),
         ("movnez.s",      0x9b0000, 0xff000f, Instr.fmt_RRR ),
         ("movsp",  0x001000, 0xfff00f, Instr.fmt_RRR_2r ),
         ("movt",   0xd30000, 0xff000f, Instr.fmt_RRR ),
@@ -396,7 +398,7 @@ class XtensaProcessor(processor_t):
         ("oeq.s",  0x2b0000, 0xff000f, Instr.fmt_RRR ),
         ("ole.s",  0x6b0000, 0xff000f, Instr.fmt_RRR ),
         ("olt.s",  0x4b0000, 0xff000f, Instr.fmt_RRR ),
-        ("or",     0x200000, 0xff000f, Instr.fmt_RRR ),
+        ("or",     0x200000, 0xff000f, Instr.fmt_RRR, CF_CHG1, lambda r, s, t: s | t),
         ("orb",    0x220000, 0xff000f, Instr.fmt_RRR ),
         ("orbc",   0x320000, 0xff000f, Instr.fmt_RRR ),
         ("quos",   0xd20000, 0xff000f, Instr.fmt_RRR ),
@@ -413,6 +415,7 @@ class XtensaProcessor(processor_t):
         ("round.s",0x8a0000, 0xff000f, Instr.fmt_RRR_ceil ),
         ("rfe",    0x003000, 0xffffff, Instr.fmt_NONE, CF_STOP ),
         ("rfi",    0x003010, 0xfff0ff, Instr.fmt_RRR_1imm, CF_STOP ),
+        ("rsil",   0x006000, 0xfff00f, Instr.fmt_RRR_immr ),
         ("rsr.prid",      0x03eb00, 0xffff0f, Instr.fmt_RSR_spec ),
         ("rsr.epc1",      0x03b100, 0xffff0f, Instr.fmt_RSR_spec ),
         ("rsr.epc2",      0x03b200, 0xffff0f, Instr.fmt_RSR_spec ),
@@ -442,9 +445,9 @@ class XtensaProcessor(processor_t):
         ("s32ri",  0x00f002, 0x00f00f, Instr.fmt_RRI8_disp32 ),
         ("sext",   0x230000, 0xff000f, Instr.fmt_RRR_sext ),
         ("sll",    0xa10000, 0xff00ff, Instr.fmt_RRR_sll ),
-        ("slli",   0x010000, 0xef000f, Instr.fmt_RRR_slli ),
+        ("slli",   0x010000, 0xef000f, Instr.fmt_RRR_slli, CF_CHG1, lambda r, s, imm: s << imm),
         ("sra",    0xb10000, 0xff0f0f, Instr.fmt_RRR_2rr ),
-        ("srai",   0x210000, 0xef000f, Instr.fmt_RRR_srai ),
+        ("srai",   0x210000, 0xef000f, Instr.fmt_RRR_srai, CF_CHG1, lambda r, s, imm: (s & 0x80000000) | (s & ~0x80000000) >> imm),
         ("src",    0x810000, 0xff000f, Instr.fmt_RRR ),
         ("srl",    0x910000, 0xff0f0f, Instr.fmt_RRR_2rr ),
         ("srli",   0x410000, 0xff000f, Instr.fmt_RRR_sh ),
@@ -457,11 +460,11 @@ class XtensaProcessor(processor_t):
         ("ssr",    0x400000, 0xfff0ff, Instr.fmt_RRR_ssa ),
         ("ssx",    0x480000, 0xff000f, Instr.fmt_RRR ),
         ("ssx",    0x580000, 0xff000f, Instr.fmt_RRR ),
-        ("sub",    0xc00000, 0xff000f, Instr.fmt_RRR ),
+        ("sub",    0xc00000, 0xff000f, Instr.fmt_RRR, CF_CHG1, lambda r, s, t: s - t),
         ("sub.s",  0x1a0000, 0xff000f, Instr.fmt_RRR ),
-        ("subx2",  0xd00000, 0xff000f, Instr.fmt_RRR ),
-        ("subx4",  0xe00000, 0xff000f, Instr.fmt_RRR ),
-        ("subx8",  0xf00000, 0xff000f, Instr.fmt_RRR ),
+        ("subx2",  0xd00000, 0xff000f, Instr.fmt_RRR, CF_CHG1, lambda r, s, t: (s << 1) - t),
+        ("subx4",  0xe00000, 0xff000f, Instr.fmt_RRR, CF_CHG1, lambda r, s, t: (s << 2) - t ),
+        ("subx8",  0xf00000, 0xff000f, Instr.fmt_RRR, CF_CHG1, lambda r, s, t: (s << 3) - t ),
         ("syscall",0x005000, 0xffffff, Instr.fmt_NONE ),
         ("trunc.s",0x9a0000, 0xff000f, Instr.fmt_RRR_ceil ),
         ("ueq.s",  0x3b0000, 0xff000f, Instr.fmt_RRR ),
@@ -487,16 +490,16 @@ class XtensaProcessor(processor_t):
         ("xorb",   0x420000, 0xff000f, Instr.fmt_RRR ),
         ("xsr",    0x610000, 0xff000f, Instr.fmt_RSR ),
 
-        ("add.n",   0x000a, 0x000f, Instr.fmt_RRRN ),
-        ("addi.n",  0x000b, 0x000f, Instr.fmt_RRRN_addi ),
+        ("add.n",   0x000a, 0x000f, Instr.fmt_RRRN, CF_CHG1, lambda r, s, t: s + t),
+        ("addi.n",  0x000b, 0x000f, Instr.fmt_RRRN_addi, CF_CHG1, lambda r, s, imm: s + imm),
         ("beqz.n",  0x008c, 0x00cf, Instr.fmt_RI6, CF_JUMP ),
         ("bnez.n",  0x00cc, 0x00cf, Instr.fmt_RI6, CF_JUMP ),
-        ("mov.n",   0x000d, 0xf00f, Instr.fmt_RRRN_2r ),
+        ("mov.n",   0x000d, 0xf00f, Instr.fmt_RRRN_2r, CF_CHG1, lambda r, s: s),
         ("break.n", 0xf02d, 0xf0ff, Instr.fmt_RRRN ),
         ("ret.n",   0xf00d, 0xffff, Instr.fmt_NNONE, CF_STOP ),
         ("retw.n",  0xf01d, 0xffff, Instr.fmt_NNONE, CF_STOP ),
         ("l32i.n",  0x0008, 0x000f, Instr.fmt_RRRN_disp ),
-        ("movi.n",  0x000c, 0x008f, Instr.fmt_RI7 ),
+        ("movi.n",  0x000c, 0x008f, Instr.fmt_RI7, CF_CHG1, lambda r, imm: imm),
         ("nop.n",   0xf03d, 0xffff, Instr.fmt_NNONE ),
         ("s32i.n",  0x0009, 0x000f, Instr.fmt_RRRN_disp ),
         ("ill.n",  0xf06d, 0xffff, Instr.fmt_NONE ),
@@ -506,6 +509,7 @@ class XtensaProcessor(processor_t):
         processor_t.__init__(self)
         self._init_instructions()
         self._init_registers()
+        self.processor_state = ProcessorState()
 
     def _add_instruction(self, instr):
         self.instrs_list.append(instr)
@@ -581,20 +585,17 @@ class XtensaProcessor(processor_t):
         insn.itype = instr.id
 
         operands = [insn[i] for i in xrange(1, 6)]
-        for o in operands:
-            o.type = o_void
         instr.parseOperands(operands, op, insn)
 
         return insn.size
 
     def emu(self, insn):
+        self.processor_state.process_insn(insn, self.instrs[insn.get_canon_mnem()])
+        features = insn.get_canon_feature()
         for i in xrange(1, 6):
             op = insn[i]
             if op.type == o_void:
                 break
-            elif op.type == o_mem:
-                insn.create_op_data(op.addr, 0, op.dtyp)
-                insn.add_dref(op.addr, 0, dr_R)
             elif op.type == o_near:
                 features = insn.get_canon_feature()
                 if features & CF_CALL:
@@ -602,11 +603,11 @@ class XtensaProcessor(processor_t):
                 else:
                     fl = fl_JN
                 insn.add_cref(op.addr, 0, fl)
-
-        feature = insn.get_canon_feature()
-        if feature & CF_JUMP:
+        if features & CF_JUMP:
             remember_problem(Q_jumps, insn.ea)
-        if not feature & CF_STOP:
+        if features & CF_STOP:
+            self.processor_state.reset()
+        else:
             insn.add_cref(insn.ea + insn.size, 0, fl_F)
         return True
 
@@ -656,6 +657,110 @@ class XtensaProcessor(processor_t):
         ctx.set_gen_cmt()
         ctx.flush_outbuf()
 
+class ProcessorState(object):
+  """Keeps the processor state and emulates part of the operations."""
+
+  def __init__(self):
+    self.reset()
+
+  def reset(self):
+    self.registers = [None] * 16
+    
+  def process_insn(self, insn, insn_def):
+    if insn_def.simple_callable:
+      self.process_simple_callable(insn, insn_def.simple_callable)
+      return
+    fn = getattr(self, insn_def.name.replace('.', '_'), None)
+    if fn:
+      try:
+        fn(insn)
+      except Exception as e:
+        print(insn.get_canon_mnem(), "%08x" % insn.ea, e)
+
+  def process_simple_callable(self, insn, fn):
+    args = []
+    features = insn.get_canon_feature()
+    for i in xrange(1, 6):
+      op = insn[i]
+      if op.type == o_void:
+          break
+      elif op.type == o_imm:
+          args.append(op.value)
+      elif op.type == o_reg:
+          args.append(self.registers[op.reg])
+    outval = None
+    try:
+      outval = fn(*args)
+    except TypeError:
+      pass # This is expected (e.g. one of the operands is unknown (None))
+    except Exception as e:
+      print(insn.get_canon_mnem(), "%08x" % insn.ea, e)
+    if features & CF_CHG1:
+      op = insn[1]
+      assert op.type == o_reg, ("%s %s" % (insn.get_canon_mnem(), [op.type for op in insn]))
+      self.registers[op.reg] = outval
+      if outval is not None and not insn.get_canon_mnem().startswith("movi"):
+        idc.MakeComm(insn.ea, "= %08x" % outval) 
+
+  def memory_access(self, insn, dtyp, rw):
+    op = insn[2]
+    addr = self.registers[op.reg]
+    if addr is not None:
+      addr += op.addr
+      insn.create_op_data(addr, 0, dtyp)
+      insn.add_dref(addr, 0, rw)
+    newval = None
+    arrow = "<="
+    if rw == dr_R:
+      dest_register = insn[1].reg
+      if addr is not None:
+        fn = {dt_byte: get_byte, dt_word: get_word, dt_dword: get_dword}[dtyp]
+        newval = fn(addr)
+      self.registers[dest_register] = newval
+      arrow = "=>"
+    else:
+      newval = self.registers[insn[1].reg]
+    if addr:
+      addr = get_name(addr)
+      if newval is not None:
+        idc.MakeComm(insn.ea, "(*%s) %s %x" % (addr, arrow, newval))
+      else:
+        idc.MakeComm(insn.ea, "(*%s)" % addr)
+
+  def l8ui(self, insn):
+    self.memory_access(insn, dt_byte, dr_R)
+  def l16si(self, insn):  # TODO: implement sign extension
+    self.memory_access(insn, dt_word, dr_R)
+  def l16ui(self, insn):
+    self.memory_access(insn, dt_word, dr_R)
+  def l32ai(self, insn):
+    self.memory_access(insn, dt_dword, dr_R)
+  def l32e(self, insn):
+    self.memory_access(insn, dt_dword, dr_R)
+  def l32i(self, insn):
+    self.memory_access(insn, dt_dword, dr_R)
+  def l32i_n(self, insn):
+    self.memory_access(insn, dt_dword, dr_R)
+  def l32r(self, insn):
+    op = insn[2]
+    insn.create_op_data(op.addr, 0, op.dtyp)
+    insn.add_dref(op.addr, 0, dr_R)
+    target = get_dword(op.addr)
+    self.registers[insn[1].reg] = target
+    idc.MakeComm(insn.ea, "= %08x (%s)" % (target, get_name(target)))
+    insn.add_dref(target, 0, dr_I)
+  def s8i(self, insn):
+    self.memory_access(insn, dt_byte, dr_W)
+  def s16i(self, insn):
+    self.memory_access(insn, dt_word, dr_W)
+  def s32e(self, insn):
+    self.memory_access(insn, dt_dword, dr_W)
+  def s32i(self, insn):
+    self.memory_access(insn, dt_dword, dr_W)
+  def s32i_n(self, insn):
+    self.memory_access(insn, dt_dword, dr_W)
+  def s32ri(self, insn):
+    self.memory_access(insn, dt_dword, dr_W)
 
 def PROCESSOR_ENTRY():
     return XtensaProcessor()
